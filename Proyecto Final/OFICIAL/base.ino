@@ -27,6 +27,8 @@
 #include <SPI.h>
 #include <MFRC522.h>
 #include <EEPROM.h>
+#include <stddef.h>
+#include <string.h>
 
 
 // ==============================================================
@@ -161,6 +163,34 @@ byte posicionPIN = 0;
 // Número de intentos incorrectos
 
 byte intentosFallidos = 0;
+
+// Desactivar cuando se complete la autenticacion por PIN.
+const bool modoPruebaRfid = true;
+bool resultadoPruebaVisible = false;
+unsigned long inicioResultadoPrueba = 0;
+
+// EEPROM v1: cabecera de cuatro bytes y dos registros de 16 bytes.
+const uint32_t firmaUsuarios = 0x55494401UL;
+const byte cantidadUsuarios = 2;
+const byte marcaUsuarioValido = 0xA5;
+
+struct UsuarioEEPROM
+{
+  byte longitudUid;
+  byte uid[10];
+  char pin[4];
+  byte valido;
+};
+
+static_assert(sizeof(UsuarioEEPROM) == 16, "Revisar formato EEPROM de usuarios");
+
+int usuarioIdentificado = -1;
+bool eepromConfigurada = false;
+int usuarioPendiente = -1;
+char pinPendiente[4];
+char comandoSerial[24];
+byte longitudComando = 0;
+bool comandoDesbordado = false;
 
 
 // ==============================================================
@@ -310,6 +340,26 @@ char leerTeclado()
 // 11. LECTURA DEL RFID
 // ==============================================================
 
+bool comprobarLectorRfid(bool informar)
+{
+  static int versionAnterior = -1;
+  byte version = rfid.PCD_ReadRegister(MFRC522::VersionReg);
+  bool comunicado = version != 0x00 && version != 0xFF;
+  if (informar || version != versionAnterior)
+  {
+    Serial.print(F("RFID VersionReg: 0x"));
+    Serial.println(version, HEX);
+    if (!comunicado)
+      Serial.println(F("RFID: sin comunicacion SPI aparente. Revise alimentacion y conexiones."));
+    else if (version == 0x90 || version == 0x91 || version == 0x92)
+      Serial.println(F("RFID: lector detectado; falta comprobar lectura de tarjeta."));
+    else
+      Serial.println(F("RFID: registro responde con version no reconocida; posible clon o fallo SPI."));
+    versionAnterior = version;
+  }
+  return comunicado;
+}
+
 String leerTarjeta()
 {
   /*
@@ -331,13 +381,275 @@ String leerTarjeta()
        return "";
   */
 
-  return "";
+  static unsigned long ultimaConsulta = 0;
+  static unsigned long ultimoDiagnostico = 0;
+  static unsigned long ultimoEvento = 0;
+  static bool lectorComunicado = false;
+  static bool primeraConsulta = true;
+  unsigned long ahora = millis();
+  if (!primeraConsulta && ahora - ultimaConsulta < 100) return "";
+  ultimaConsulta = ahora;
+
+  if (primeraConsulta || ahora - ultimoDiagnostico >= 5000)
+  {
+    lectorComunicado = comprobarLectorRfid(false);
+    ultimoDiagnostico = ahora;
+    primeraConsulta = false;
+  }
+  if (!lectorComunicado) return "";
+
+  // Esta funcion devuelve true para REQA correcto o colision; no garantiza un UID.
+  bool tarjetaDetectada = rfid.PICC_IsNewCardPresent();
+  if (!tarjetaDetectada)
+  {
+    if (ahora - ultimoEvento >= 5000)
+    {
+      Serial.println(F("RFID: tarjeta no detectada (REQA sin respuesta valida)."));
+      ultimoEvento = ahora;
+    }
+    return "";
+  }
+
+  // PICC_ReadCardSerial() oculta el StatusCode de PICC_Select().
+  // Usar la misma operacion directamente permite diagnosticar el fallo real.
+  MFRC522::StatusCode resultado = rfid.PICC_Select(&rfid.uid);
+  if (resultado != MFRC522::STATUS_OK)
+  {
+    if (ahora - ultimoEvento >= 2000)
+    {
+      Serial.print(F("RFID: tarjeta detectada, UID ilegible. Estado: "));
+      Serial.println(rfid.GetStatusCodeName(resultado));
+      Serial.println(F("Retire la tarjeta y acerque solo una tarjeta compatible."));
+      ultimoEvento = ahora;
+    }
+    // No usar un UID incompleto ni enviarlo a EEPROM. Restablecer el lector.
+    rfid.PCD_StopCrypto1();
+    rfid.PCD_Init();
+    delay(4);
+    lectorComunicado = comprobarLectorRfid(false);
+    return "";
+  }
+
+  if (rfid.uid.size != 4 && rfid.uid.size != 7 && rfid.uid.size != 10)
+  {
+    rfid.PICC_HaltA();
+    rfid.PCD_StopCrypto1();
+    if (ahora - ultimoEvento >= 2000)
+    {
+      Serial.println(F("RFID: UID con longitud invalida; lectura descartada."));
+      ultimoEvento = ahora;
+    }
+    return "";
+  }
+
+  // Dos caracteres hexadecimales por byte, en mayusculas y sin separadores.
+  // Conservar ceros iniciales y longitud permite comparar el UID con EEPROM.
+  const char digitosHex[] = "0123456789ABCDEF";
+  char uidHex[sizeof(rfid.uid.uidByte) * 2 + 1];
+
+  for (byte i = 0; i < rfid.uid.size; i++)
+  {
+    uidHex[i * 2] = digitosHex[rfid.uid.uidByte[i] >> 4];
+    uidHex[i * 2 + 1] = digitosHex[rfid.uid.uidByte[i] & 0x0F];
+  }
+
+  uidHex[rfid.uid.size * 2] = '\0';
+
+  MFRC522::StatusCode cierre = rfid.PICC_HaltA();
+  rfid.PCD_StopCrypto1();
+
+  Serial.println(F("RFID: UID leido correctamente."));
+  Serial.print(F("RFID UID: "));
+  Serial.println(uidHex);
+  Serial.print(F("RFID tipo indicado por SAK: "));
+  Serial.println(rfid.PICC_GetTypeName(rfid.PICC_GetType(rfid.uid.sak)));
+  if (cierre != MFRC522::STATUS_OK)
+  {
+    Serial.print(F("RFID: aviso al finalizar tarjeta: "));
+    Serial.println(rfid.GetStatusCodeName(cierre));
+  }
+  ultimoEvento = ahora;
+
+  return String(uidHex);
 }
 
 
 // ==============================================================
 // 12. VALIDACIÓN DE TARJETA
 // ==============================================================
+
+int direccionUsuario(byte indice)
+{
+  return sizeof(firmaUsuarios) + indice * sizeof(UsuarioEEPROM);
+}
+
+bool leerUsuario(byte indice, UsuarioEEPROM &usuario)
+{
+  if (!eepromConfigurada || indice >= cantidadUsuarios)
+  {
+    return false;
+  }
+
+  EEPROM.get(direccionUsuario(indice), usuario);
+  if (usuario.valido != marcaUsuarioValido ||
+      (usuario.longitudUid != 4 && usuario.longitudUid != 7 && usuario.longitudUid != 10))
+  {
+    return false;
+  }
+
+  for (byte i = 0; i < 4; i++)
+  {
+    if (usuario.pin[i] < '0' || usuario.pin[i] > '9') return false;
+  }
+  return true;
+}
+
+bool coincideUid(const String &uid, const UsuarioEEPROM &usuario)
+{
+  if (uid.length() != usuario.longitudUid * 2) return false;
+
+  const char digitosHex[] = "0123456789ABCDEF";
+  for (byte i = 0; i < usuario.longitudUid; i++)
+  {
+    if (uid[i * 2] != digitosHex[usuario.uid[i] >> 4] ||
+        uid[i * 2 + 1] != digitosHex[usuario.uid[i] & 0x0F]) return false;
+  }
+  return true;
+}
+
+void iniciarUsuarios()
+{
+  uint32_t firmaLeida;
+  EEPROM.get(0, firmaLeida);
+  eepromConfigurada = firmaLeida == firmaUsuarios;
+  Serial.println(eepromConfigurada ? F("EEPROM: formato de usuarios configurado.") :
+                                    F("EEPROM: sin configurar o formato incompatible; no se escribio nada."));
+  for (byte i = 0; i < cantidadUsuarios; i++)
+  {
+    UsuarioEEPROM usuario;
+    Serial.print(F("Usuario "));
+    Serial.print(i + 1);
+    Serial.println(leerUsuario(i, usuario) ? F(": registrado.") : F(": no registrado o invalido."));
+  }
+  Serial.println(F("Registro: envie REG 1 1234 o REG 2 5678 y acerque la tarjeta real."));
+  Serial.println(F("Use su PIN de cuatro digitos. CANCELAR cancela el registro pendiente."));
+}
+
+void procesarRegistroSerial()
+{
+  while (Serial.available() > 0)
+  {
+    char caracter = Serial.read();
+    if (caracter == '\r' || caracter == '\n')
+    {
+      if (comandoDesbordado)
+      {
+        Serial.println(F("Registro: comando demasiado largo."));
+      }
+      else if (longitudComando > 0)
+      {
+        comandoSerial[longitudComando] = '\0';
+        if (strcmp(comandoSerial, "CANCELAR") == 0)
+        {
+          usuarioPendiente = -1;
+          memset(pinPendiente, 0, sizeof(pinPendiente));
+          reiniciarSistema();
+          Serial.println(F("Registro cancelado."));
+        }
+        else
+        {
+          bool correcto = longitudComando == 10 && strncmp(comandoSerial, "REG ", 4) == 0 &&
+                          comandoSerial[4] >= '1' && comandoSerial[4] <= '2' && comandoSerial[5] == ' ';
+          for (byte i = 6; correcto && i < 10; i++)
+          {
+            correcto = comandoSerial[i] >= '0' && comandoSerial[i] <= '9';
+          }
+          if (correcto)
+          {
+            usuarioPendiente = comandoSerial[4] - '1';
+            memcpy(pinPendiente, comandoSerial + 6, 4);
+            usuarioIdentificado = -1;
+            Serial.print(F("Registro preparado para usuario "));
+            Serial.print(usuarioPendiente + 1);
+            Serial.println(F(". Acerque su tarjeta; reemplazara ese registro."));
+          }
+          else Serial.println(F("Comando invalido. Use REG <1|2> <PIN de 4 digitos> o CANCELAR."));
+        }
+      }
+      memset(comandoSerial, 0, sizeof(comandoSerial));
+      longitudComando = 0;
+      comandoDesbordado = false;
+    }
+    else if (!comandoDesbordado)
+    {
+      if (longitudComando < sizeof(comandoSerial) - 1) comandoSerial[longitudComando++] = caracter;
+      else comandoDesbordado = true;
+    }
+  }
+}
+
+void registrarTarjeta(const String &uid)
+{
+  UsuarioEEPROM nuevo = {};
+  nuevo.longitudUid = uid.length() / 2;
+  if ((nuevo.longitudUid != 4 && nuevo.longitudUid != 7 && nuevo.longitudUid != 10) ||
+      uid.length() != nuevo.longitudUid * 2)
+  {
+    Serial.println(F("Registro: longitud UID invalida."));
+    return;
+  }
+
+  const char digitosHex[] = "0123456789ABCDEF";
+  for (byte i = 0; i < nuevo.longitudUid; i++)
+  {
+    const char *alto = strchr(digitosHex, uid[i * 2]);
+    const char *bajo = strchr(digitosHex, uid[i * 2 + 1]);
+    if (!alto || !bajo || uid[i * 2] == '\0' || uid[i * 2 + 1] == '\0')
+    {
+      Serial.println(F("Registro: UID hexadecimal invalido."));
+      return;
+    }
+    nuevo.uid[i] = ((alto - digitosHex) << 4) | (bajo - digitosHex);
+  }
+
+  for (byte i = 0; i < cantidadUsuarios; i++)
+  {
+    UsuarioEEPROM existente;
+    if (i != usuarioPendiente && leerUsuario(i, existente) && coincideUid(uid, existente))
+    {
+      Serial.println(F("Registro: tarjeta ya asignada al otro usuario. Acerque otra tarjeta."));
+      return;
+    }
+  }
+
+  // Inicializar solamente ante una solicitud explicita de registro.
+  if (!eepromConfigurada)
+  {
+    uint32_t firmaInvalida = 0;
+    EEPROM.put(0, firmaInvalida);
+    UsuarioEEPROM vacio = {};
+    for (byte i = 0; i < cantidadUsuarios; i++) EEPROM.put(direccionUsuario(i), vacio);
+    EEPROM.put(0, firmaUsuarios);
+    eepromConfigurada = true;
+  }
+
+  memcpy(nuevo.pin, pinPendiente, 4);
+  int direccion = direccionUsuario(usuarioPendiente);
+  // Invalidar primero y confirmar al final evita aceptar una escritura parcial.
+  EEPROM.update(direccion + offsetof(UsuarioEEPROM, valido), 0);
+  EEPROM.put(direccion, nuevo);
+  EEPROM.update(direccion + offsetof(UsuarioEEPROM, valido), marcaUsuarioValido);
+
+  UsuarioEEPROM verificado;
+  bool guardado = leerUsuario(usuarioPendiente, verificado) && coincideUid(uid, verificado) &&
+                  memcmp(verificado.pin, pinPendiente, 4) == 0;
+  Serial.print(F("Usuario "));
+  Serial.print(usuarioPendiente + 1);
+  Serial.println(guardado ? F(": guardado y verificado en EEPROM.") : F(": error al verificar EEPROM."));
+  usuarioPendiente = -1;
+  memset(pinPendiente, 0, sizeof(pinPendiente));
+  reiniciarSistema();
+}
 
 bool tarjetaAutorizada(String uid)
 {
@@ -353,6 +665,20 @@ bool tarjetaAutorizada(String uid)
        false -> tarjeta no autorizada
   */
 
+  usuarioIdentificado = -1;
+  for (byte i = 0; i < cantidadUsuarios; i++)
+  {
+    UsuarioEEPROM usuario;
+    if (leerUsuario(i, usuario) && coincideUid(uid, usuario))
+    {
+      usuarioIdentificado = i;
+      Serial.print(F("RFID autorizado: usuario "));
+      Serial.println(i + 1);
+      return true;
+    }
+  }
+
+  Serial.println(F("RFID denegado: UID no registrado o EEPROM sin configurar."));
   return false;
 }
 
@@ -518,6 +844,8 @@ void activarAlarma()
 
 void reiniciarSistema()
 {
+  resultadoPruebaVisible = false;
+  usuarioIdentificado = -1;
   UIDLeido = "";
 
   posicionPIN = 0;
@@ -528,10 +856,10 @@ void reiniciarSistema()
   lcd.clear();
 
   lcd.setCursor(0, 0);
-  lcd.print("SISTEMA URL");
+  lcd.print(modoPruebaRfid ? "CONTROL ACCESO" : "SISTEMA URL");
 
   lcd.setCursor(0, 1);
-  lcd.print("ACERQUE TARJETA");
+  lcd.print(modoPruebaRfid ? "PRESENTE TARJETA" : "ACERQUE TARJETA");
 
 
   estado = ESPERANDO_RFID;
@@ -550,6 +878,8 @@ void setup()
   // ----------------------------------------------------------
 
   Serial.begin(9600);
+
+  iniciarUsuarios();
 
 
   // ----------------------------------------------------------
@@ -600,7 +930,7 @@ void setup()
   // SERVO
   // ----------------------------------------------------------
 
-  puerta.attach(PIN_SERVO);
+  if (!modoPruebaRfid) puerta.attach(PIN_SERVO);
 
 
   // ----------------------------------------------------------
@@ -610,6 +940,10 @@ void setup()
   SPI.begin();
 
   rfid.PCD_Init();
+
+  // Algunos modulos requieren un breve tiempo de estabilizacion tras el reset.
+  delay(4);
+  comprobarLectorRfid(true);
 
 
   // ----------------------------------------------------------
@@ -636,6 +970,46 @@ void setup()
 
 void loop()
 {
+  procesarRegistroSerial();
+
+  // Registro voluntario: usa la lectura existente sin cambiar los estados.
+  if (usuarioPendiente >= 0)
+  {
+    String uidRegistro = leerTarjeta();
+    if (uidRegistro != "") registrarTarjeta(uidRegistro);
+    return;
+  }
+
+  // Prueba de identificacion exclusivamente: nunca entra al flujo de apertura.
+  // millis() mantiene disponibles REG y CANCELAR mientras se muestra el resultado.
+  if (modoPruebaRfid)
+  {
+    if (resultadoPruebaVisible)
+    {
+      if (millis() - inicioResultadoPrueba >= 2000) reiniciarSistema();
+      return;
+    }
+
+    UIDLeido = leerTarjeta();
+    if (UIDLeido == "") return;
+
+    bool registrada = tarjetaAutorizada(UIDLeido);
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print(registrada ? "TARJETA VALIDA" : "TARJETA INVALIDA");
+    lcd.setCursor(0, 1);
+    if (registrada)
+    {
+      lcd.print("USUARIO ");
+      lcd.print(usuarioIdentificado + 1);
+    }
+    else lcd.print("ACCESO DENEGADO");
+
+    Serial.println(F("MODO PRUEBA RFID: sin autorizacion de acceso fisico."));
+    inicioResultadoPrueba = millis();
+    resultadoPruebaVisible = true;
+    return;
+  }
 
   /*
    ============================================================
