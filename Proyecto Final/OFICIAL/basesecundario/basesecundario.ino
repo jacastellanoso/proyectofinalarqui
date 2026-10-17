@@ -12,7 +12,7 @@
     D6 -> resistencia 330 ohm -> anodo LED azul     (8)
     Catodos de LED -> GND secundario.
 
-  Protocolo de prueba previsto para el Arduino PRINCIPAL:
+  Protocolo usado por el Arduino PRINCIPAL:
     Linea inactiva = HIGH.
     Pulso LOW de aprox. 100 ms -> LED amarillo (estado 5)
     Pulso LOW de aprox. 200 ms -> LED verde    (estado 6)
@@ -21,10 +21,9 @@
     Pulso LOW de aprox. 500 ms -> apagar los cuatro LED.
     Esperar al menos 150 ms en HIGH entre comandos.
 
-  ATENCION:
-  Este es SOLO el receptor. El principal requiere el codigo emisor
-  correspondiente; cargar este sketch NO prueba aun la comunicacion.
-  El LED seleccionado permanece encendido hasta recibir otro comando.
+  Un unico LED de este Arduino queda encendido mientras su estado
+  este activo. Se apaga al recibir otro estado o el comando de apagado.
+  No se apaga automaticamente luego de 2 segundos.
 */
 
 const byte PIN_SENAL = 2;
