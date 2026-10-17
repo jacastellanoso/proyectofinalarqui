@@ -46,7 +46,7 @@
  D3  -> Botón de diagnóstico
  D4  -> Servo
 
- D5  -> Libre
+ D5  -> Comunicación de estados con Arduino secundario (D2)
 
  D6  -> RFID RST
 
@@ -72,6 +72,9 @@
 const byte PIN_BUZZER = 2;
 const byte PIN_DIAG   = 3;
 const byte PIN_SERVO  = 4;
+
+// Arduino principal D5 -> Arduino secundario D2 (GND compartida).
+const byte PIN_LED_SECUNDARIO = 5;
 
 const byte RFID_RST = 6;
 
@@ -235,6 +238,42 @@ void cambiarEstado(EstadoSistema nuevoEstado);
 
 
 // ==============================================================
+// 6A. COMUNICACION CON ARDUINO SECUNDARIO - LED 5 A LED 8
+// ==============================================================
+/*
+  Compatible con arduino_secundario_receptor_4_leds.txt.
+  Protocolo: un pulso LOW en D5, con reposo HIGH:
+    100 ms = LED 5 amarillo (validando PIN)
+    200 ms = LED 6 verde    (autorizado)
+    300 ms = LED 7 rojo     (denegado)
+    400 ms = LED 8 azul     (alarma)
+    500 ms = apagar LED 5 a 8.
+
+  Se envia un comando solo cuando cambia el LED requerido.
+  Los LED 1 a 4 siguen bajo el 74HC595 original.
+*/
+void actualizarLedsSecundarios()
+{
+  static byte ultimoComando = 255; // Obliga a apagar en la inicializacion.
+  byte comando = 0;
+
+  if      (registro & B00010000) comando = 5;
+  else if (registro & B00100000) comando = 6;
+  else if (registro & B01000000) comando = 7;
+  else if (registro & B10000000) comando = 8;
+
+  if (comando == ultimoComando) return;
+  ultimoComando = comando;
+
+  unsigned int duracionMs = (comando == 0) ? 500 : (comando - 4) * 100;
+  digitalWrite(PIN_LED_SECUNDARIO, LOW);
+  delay(duracionMs);
+  digitalWrite(PIN_LED_SECUNDARIO, HIGH);
+  // Pausa necesaria para distinguir comandos consecutivos.
+  delay(160);
+}
+
+// ==============================================================
 // 7. ACTUALIZAR 74HC595
 // ==============================================================
 
@@ -245,6 +284,9 @@ void actualizarRegistro()
   shiftOut(DATA, CLOCK, MSBFIRST, registro);
 
   digitalWrite(LATCH, HIGH);
+
+  // Replica los estados LED 5..8 en el segundo Arduino.
+  actualizarLedsSecundarios();
 }
 
 void actualizarLedsEstado()
@@ -925,6 +967,10 @@ void setup()
   pinMode(DATA, OUTPUT);
   pinMode(CLOCK, OUTPUT);
   pinMode(LATCH, OUTPUT);
+
+  // Linea de control al Arduino secundario: HIGH en reposo.
+  digitalWrite(PIN_LED_SECUNDARIO, HIGH);
+  pinMode(PIN_LED_SECUNDARIO, OUTPUT);
 
   cambiarEstado(INICIO);
 
