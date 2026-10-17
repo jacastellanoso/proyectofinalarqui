@@ -105,29 +105,29 @@ MFRC522 rfid(RFID_SS, RFID_RST);
 
                   74HC595
 
-             Q0 ─────► Keypad R1
-             Q1 ─────► Keypad R2
-             Q2 ─────► Keypad R3
-             Q3 ─────► Keypad R4
+             Q0 ─────► LED INICIO
+             Q1 ─────► LED ESPERANDO_RFID
+             Q2 ─────► LED VALIDANDO_RFID
+             Q3 ─────► LED ESPERANDO_PIN
 
-             Q4 ─────► LED verde
-             Q5 ─────► LED rojo
-             Q6 ─────► LED amarillo
-             Q7 ─────► LED azul
+             Q4 ─────► LED VALIDANDO_PIN
+             Q5 ─────► LED AUTORIZADO
+             Q6 ─────► LED DENEGADO
+             Q7 ─────► LED ALARMA
 
 
  Bits:
 
        7   6   5   4   3   2   1   0
      ┌───┬───┬───┬───┬───┬───┬───┬───┐
-     │AZ │AM │RO │VE │R4 │R3 │R2 │R1 │
+     │A  │D  │AU │VP │EP │VR │ER │I  │
      └───┴───┴───┴───┴───┴───┴───┴───┘
 
 */
 
-// Inicialmente las cuatro filas están HIGH.
+// Ocho LEDs activos en HIGH. Desconectar las filas del keypad del 74HC595.
 
-byte registro = B00001111;
+byte registro = B00000001;
 
 
 // ==============================================================
@@ -166,6 +166,8 @@ byte intentosFallidos = 0;
 
 // Desactivar cuando se complete la autenticacion por PIN.
 const bool modoPruebaRfid = true;
+bool pruebaLedsActiva = false;
+unsigned long inicioPruebaLeds = 0;
 bool resultadoPruebaVisible = false;
 unsigned long inicioResultadoPrueba = 0;
 
@@ -207,6 +209,10 @@ bool comandoDesbordado = false;
 
 enum EstadoSistema
 {
+  INICIO,
+
+  VALIDANDO_RFID,
+
   ESPERANDO_RFID,
 
   ESPERANDO_PIN,
@@ -223,7 +229,9 @@ enum EstadoSistema
 };
 
 
-EstadoSistema estado = ESPERANDO_RFID;
+EstadoSistema estado = INICIO;
+
+void cambiarEstado(EstadoSistema nuevoEstado);
 
 
 // ==============================================================
@@ -239,6 +247,29 @@ void actualizarRegistro()
   digitalWrite(LATCH, HIGH);
 }
 
+void actualizarLedsEstado()
+{
+  switch (estado)
+  {
+    case INICIO: registro = B00000001; break;
+    case ESPERANDO_RFID: registro = B00000010; break;
+    case VALIDANDO_RFID: registro = B00000100; break;
+    case ESPERANDO_PIN: registro = B00001000; break;
+    case VALIDANDO_PIN: registro = B00010000; break;
+    case ACCESO_AUTORIZADO:
+    case PUERTA_ABIERTA: registro = B00100000; break;
+    case ACCESO_DENEGADO: registro = B01000000; break;
+    case ALARMA: registro = B10000000; break;
+  }
+  actualizarRegistro();
+}
+
+void cambiarEstado(EstadoSistema nuevoEstado)
+{
+  estado = nuevoEstado;
+  actualizarLedsEstado();
+}
+
 
 // ==============================================================
 // 8. CONTROL DE LEDs
@@ -246,40 +277,16 @@ void actualizarRegistro()
 
 void apagarLEDs()
 {
-  /*
-   TODO - REGISTROS / OPERACIONES BINARIAS
-
-   Los LEDs se encuentran conectados a Q4-Q7.
-
-   Deben apagarse SIN modificar Q0-Q3,
-   ya que esos bits controlan las filas
-   del teclado.
-
-   Modificar la variable:
-
-       registro
-
-   y posteriormente actualizar el 74HC595.
-  */
+  registro = 0;
+  actualizarRegistro();
 }
 
 
 void encenderLED(byte numero)
 {
-  /*
-   TODO - REGISTROS / OPERACIONES BINARIAS
-
-   Encender solamente uno de los LEDs.
-
-       numero = 0 -> Q4 -> Verde
-       numero = 1 -> Q5 -> Rojo
-       numero = 2 -> Q6 -> Amarillo
-       numero = 3 -> Q7 -> Azul
-
-   IMPORTANTE:
-
-   No modificar Q0-Q3.
-  */
+  if (numero > 7) return;
+  registro = byte(1U << numero);
+  actualizarRegistro();
 }
 
 
@@ -289,6 +296,7 @@ void encenderLED(byte numero)
 
 void seleccionarFila(byte fila)
 {
+  if (modoPruebaRfid) return; // Q0-Q7 reservados para LEDs.
   /*
    TODO - LABORATORIO KEYPAD
 
@@ -314,6 +322,7 @@ void seleccionarFila(byte fila)
 
 char leerTeclado()
 {
+  if (modoPruebaRfid) return 0;
   /*
    TODO - LABORATORIO KEYPAD
 
@@ -533,6 +542,7 @@ void iniciarUsuarios()
   }
   Serial.println(F("Registro: envie REG 1 1234 o REG 2 5678 y acerque la tarjeta real."));
   Serial.println(F("Use su PIN de cuatro digitos. CANCELAR cancela el registro pendiente."));
+  Serial.println(F("LED <0..7>: prueba visual de 2 segundos, solo en modo prueba RFID."));
 }
 
 void procesarRegistroSerial()
@@ -556,6 +566,21 @@ void procesarRegistroSerial()
           reiniciarSistema();
           Serial.println(F("Registro cancelado."));
         }
+        else if (longitudComando == 5 && strncmp(comandoSerial, "LED ", 4) == 0 &&
+                 comandoSerial[4] >= '0' && comandoSerial[4] <= '7')
+        {
+          if (!modoPruebaRfid || usuarioPendiente >= 0)
+            Serial.println(F("LED: requiere modo prueba RFID sin registro pendiente. Use CANCELAR."));
+          else
+          {
+            pruebaLedsActiva = true;
+            inicioPruebaLeds = millis();
+            encenderLED(comandoSerial[4] - '0');
+            Serial.print(F("Prueba visual Q"));
+            Serial.print(comandoSerial[4]);
+            Serial.println(F(": 2 s, sin servo, buzzer ni autenticacion."));
+          }
+        }
         else
         {
           bool correcto = longitudComando == 10 && strncmp(comandoSerial, "REG ", 4) == 0 &&
@@ -566,6 +591,7 @@ void procesarRegistroSerial()
           }
           if (correcto)
           {
+            reiniciarSistema();
             usuarioPendiente = comandoSerial[4] - '1';
             memcpy(pinPendiente, comandoSerial + 6, 4);
             usuarioIdentificado = -1;
@@ -573,7 +599,7 @@ void procesarRegistroSerial()
             Serial.print(usuarioPendiente + 1);
             Serial.println(F(". Acerque su tarjeta; reemplazara ese registro."));
           }
-          else Serial.println(F("Comando invalido. Use REG <1|2> <PIN de 4 digitos> o CANCELAR."));
+          else Serial.println(F("Comando invalido. Use REG <1|2> <PIN de 4 digitos>, CANCELAR o LED <0..7>."));
         }
       }
       memset(comandoSerial, 0, sizeof(comandoSerial));
@@ -844,6 +870,7 @@ void activarAlarma()
 
 void reiniciarSistema()
 {
+  pruebaLedsActiva = false;
   resultadoPruebaVisible = false;
   usuarioIdentificado = -1;
   UIDLeido = "";
@@ -862,7 +889,7 @@ void reiniciarSistema()
   lcd.print(modoPruebaRfid ? "PRESENTE TARJETA" : "ACERQUE TARJETA");
 
 
-  estado = ESPERANDO_RFID;
+  cambiarEstado(ESPERANDO_RFID);
 }
 
 
@@ -899,7 +926,7 @@ void setup()
   pinMode(CLOCK, OUTPUT);
   pinMode(LATCH, OUTPUT);
 
-  actualizarRegistro();
+  cambiarEstado(INICIO);
 
 
   // ----------------------------------------------------------
@@ -953,7 +980,7 @@ void setup()
   lcd.clear();
 
   lcd.setCursor(0, 0);
-  lcd.print("SISTEMA URL");
+  lcd.print("SISTEMA ACCESO");
 
   lcd.setCursor(0, 1);
   lcd.print("INICIANDO...");
@@ -971,6 +998,19 @@ void setup()
 void loop()
 {
   procesarRegistroSerial();
+
+  // Prueba visual independiente de los estados y los actuadores.
+  if (pruebaLedsActiva)
+  {
+    if (millis() - inicioPruebaLeds >= 2000)
+    {
+      pruebaLedsActiva = false;
+      if (resultadoPruebaVisible && millis() - inicioResultadoPrueba >= 2000)
+        reiniciarSistema();
+      else actualizarLedsEstado();
+    }
+    return;
+  }
 
   // Registro voluntario: usa la lectura existente sin cambiar los estados.
   if (usuarioPendiente >= 0)
@@ -993,7 +1033,9 @@ void loop()
     UIDLeido = leerTarjeta();
     if (UIDLeido == "") return;
 
+    cambiarEstado(VALIDANDO_RFID);
     bool registrada = tarjetaAutorizada(UIDLeido);
+    cambiarEstado(registrada ? ACCESO_AUTORIZADO : ACCESO_DENEGADO);
     lcd.clear();
     lcd.setCursor(0, 0);
     lcd.print(registrada ? "TARJETA VALIDA" : "TARJETA INVALIDA");
@@ -1027,6 +1069,11 @@ void loop()
   switch (estado)
   {
 
+    // Estados transitorios atendidos en setup y durante la comprobacion del UID.
+    case INICIO:
+    case VALIDANDO_RFID:
+      break;
+
     // ========================================================
     // ESTADO 0 - ESPERANDO RFID
     // ========================================================
@@ -1037,6 +1084,7 @@ void loop()
 
       if (UIDLeido != "")
       {
+        cambiarEstado(VALIDANDO_RFID);
         if (tarjetaAutorizada(UIDLeido))
         {
           lcd.clear();
@@ -1047,11 +1095,11 @@ void loop()
           lcd.setCursor(0, 1);
           lcd.print("INGRESE PIN");
 
-          estado = ESPERANDO_PIN;
+          cambiarEstado(ESPERANDO_PIN);
         }
         else
         {
-          estado = ACCESO_DENEGADO;
+          cambiarEstado(ACCESO_DENEGADO);
         }
       }
 
@@ -1066,7 +1114,7 @@ void loop()
 
       if (leerPIN())
       {
-        estado = VALIDANDO_PIN;
+        cambiarEstado(VALIDANDO_PIN);
       }
 
       break;
@@ -1080,13 +1128,13 @@ void loop()
 
       if (validarPIN())
       {
-        estado = ACCESO_AUTORIZADO;
+        cambiarEstado(ACCESO_AUTORIZADO);
       }
       else
       {
         intentosFallidos++;
 
-        estado = ACCESO_DENEGADO;
+        cambiarEstado(ACCESO_DENEGADO);
       }
 
       break;
@@ -1107,14 +1155,14 @@ void loop()
       lcd.print("AUTORIZADO");
 
 
-      encenderLED(0);
+      actualizarLedsEstado();
 
       sonidoCorrecto();
 
       abrirPuerta();
 
 
-      estado = PUERTA_ABIERTA;
+      cambiarEstado(PUERTA_ABIERTA);
 
       break;
 
@@ -1134,7 +1182,7 @@ void loop()
       lcd.print("DENEGADO");
 
 
-      encenderLED(1);
+      actualizarLedsEstado();
 
       sonidoError();
 
@@ -1144,7 +1192,7 @@ void loop()
 
       if (intentosFallidos >= 3)
       {
-        estado = ALARMA;
+        cambiarEstado(ALARMA);
       }
       else
       {
