@@ -110,9 +110,15 @@ MFRC522 rfid(RFID_SS, RFID_RST);
    Q6: LED 3 AMARILLO / VALIDANDO RFID
    Q7: LED 4 AZUL     / ESPERANDO PIN
    Los LED 5-8 estan en el Arduino secundario.
-   Nota: el escaneo del teclado continua pendiente (TODO).
+   Antes de conectar: aislar cada fila con un diodo, anodo hacia R1-R4
+   y catodo hacia Q0-Q3. Verificar caida del diodo y nivel LOW con pull-up.
+   Sin aislamiento, varias teclas pueden unir salidas HIGH y LOW.
+   El rechazo por software NO elimina ese cortocircuito fisico.
 */
 byte registro = B00010000;
+// Las filas son independientes de la codificacion logica de los ocho LEDs.
+byte patronFilas = B00001111;
+byte comandoLedSecundario = 0;
 
 
 // ==============================================================
@@ -149,8 +155,14 @@ byte posicionPIN = 0;
 
 byte intentosFallidos = 0;
 
-// Desactivar cuando se complete la autenticacion por PIN.
-const bool modoPruebaRfid = true;
+// true recupera la prueba RFID anterior; false permite probar RFID + PIN.
+const bool modoPruebaRfid = false;
+// Mantener true: prueba PIN sin servo, sonidos, intentos ni alarma.
+const bool modoPruebaTeclado = true;
+const unsigned long antirreboteMs = 30;
+byte teclaCandidata = 255;
+unsigned long ultimoCambioTecla = 0;
+bool tecladoBloqueado = true; // Exigir liberacion al iniciar cada sesion.
 bool pruebaLedsActiva = false;
 unsigned long inicioPruebaLeds = 0;
 bool resultadoPruebaVisible = false;
@@ -235,18 +247,12 @@ void cambiarEstado(EstadoSistema nuevoEstado);
   Los LED 1 a 4 siguen en Q4-Q7 del 74HC595 original.
   Q0-Q3 se conservan para las filas del teclado.
   En estados 5-8, los cuatro LED del principal se apagan.
-  NOTA: La lectura del teclado y la autenticacion PIN todavia estan TODO
-  en el programa base y no se implementan en esta modificacion.
+  El barrido de filas no transmite comandos al secundario.
 */
 void actualizarLedsSecundarios()
 {
   static byte ultimoComando = 255; // Obliga a apagar en la inicializacion.
-  byte comando = 0;
-
-  if      (registro & B00000001) comando = 5;
-  else if (registro & B00000010) comando = 6;
-  else if (registro & B00000100) comando = 7;
-  else if (registro & B00001000) comando = 8;
+  byte comando = comandoLedSecundario;
 
   if (comando == ultimoComando) return;
   ultimoComando = comando;
@@ -266,14 +272,19 @@ void actualizarLedsSecundarios()
 void actualizarRegistro()
 {
   digitalWrite(LATCH, LOW);
-  // Q0-Q3 son las filas del teclado: en reposo deben estar HIGH.
-  // Q4-Q7 corresponden a los cuatro LEDs ya conectados al 74HC595.
-  // Escribimos los cuatro bits superiores del estado y mantenemos
-  // las filas del teclado inactivas, sin activar LEDs incorrectos.
-  shiftOut(DATA, CLOCK, MSBFIRST, byte((registro & B11110000) | B00001111));
+  // Conservar los LEDs al seleccionar filas; no enviar pulsos desde aqui.
+  shiftOut(DATA, CLOCK, MSBFIRST, byte((registro & B11110000) | patronFilas));
   digitalWrite(LATCH, HIGH);
+}
 
-  // LED 5-8 por D5; tambien se manda apagar al volver a LED 1-4.
+void aplicarLeds()
+{
+  comandoLedSecundario = 0;
+  if      (registro & B00000001) comandoLedSecundario = 5;
+  else if (registro & B00000010) comandoLedSecundario = 6;
+  else if (registro & B00000100) comandoLedSecundario = 7;
+  else if (registro & B00001000) comandoLedSecundario = 8;
+  actualizarRegistro();
   actualizarLedsSecundarios();
 }
 
@@ -291,7 +302,7 @@ void actualizarLedsEstado()
     case ACCESO_DENEGADO: registro = B00000100; break;
     case ALARMA: registro = B00001000; break;
   }
-  actualizarRegistro();
+  aplicarLeds();
 }
 
 void cambiarEstado(EstadoSistema nuevoEstado)
@@ -308,7 +319,7 @@ void cambiarEstado(EstadoSistema nuevoEstado)
 void apagarLEDs()
 {
   registro = 0;
-  actualizarRegistro();
+  aplicarLeds();
 }
 
 
@@ -318,7 +329,7 @@ void encenderLED(byte numero)
   // Pruebas LED 0..7: 0..3 = primeros cuatro LED, 4..7 = secundarios.
   if (numero < 4) registro = byte(1U << (numero + 4));
   else registro = byte(1U << (numero - 4));
-  actualizarRegistro();
+  aplicarLeds();
 }
 
 
@@ -328,23 +339,9 @@ void encenderLED(byte numero)
 
 void seleccionarFila(byte fila)
 {
-  if (modoPruebaRfid) return; // Keypad no implementado en esta etapa.
-  /*
-   TODO - LABORATORIO KEYPAD
-
-   Para detectar una tecla:
-
-   1. Colocar Q0-Q3 en HIGH.
-
-   2. Colocar únicamente la fila que se desea
-      consultar en LOW.
-
-   3. Enviar el nuevo valor al 74HC595.
-
-   Pista:
-
-       bitClear()
-  */
+  patronFilas = B00001111;
+  if (fila < 4) bitClear(patronFilas, fila);
+  actualizarRegistro();
 }
 
 
@@ -355,25 +352,44 @@ void seleccionarFila(byte fila)
 char leerTeclado()
 {
   if (modoPruebaRfid) return 0;
-  /*
-   TODO - LABORATORIO KEYPAD
-
-   Implementar el barrido de la matriz 4x4.
-
-   El algoritmo deberá:
-
-   1. Seleccionar una fila.
-   2. Leer las cuatro columnas.
-   3. Determinar qué tecla fue presionada.
-   4. Manejar el rebote de la tecla.
-   5. Retornar el carácter correspondiente.
-
-   Si ninguna tecla fue presionada:
-
-       return 0;
-  */
-
-  return 0;
+  byte detectada = 0;
+  byte cantidad = 0;
+  for (byte fila = 0; fila < 4; fila++)
+  {
+    seleccionarFila(fila);
+    delayMicroseconds(10); // Estabilizacion electrica, no antirrebote.
+    for (byte columna = 0; columna < 4; columna++)
+    {
+      if (digitalRead(columnas[columna]) == LOW)
+      {
+        detectada = fila * 4 + columna + 1;
+        cantidad++;
+      }
+    }
+  }
+  seleccionarFila(4); // Todas HIGH incluso al detectar varias teclas.
+  if (cantidad > 1)
+  {
+    detectada = 255;
+    tecladoBloqueado = true; // No aceptar hasta soltar todas.
+  }
+  unsigned long ahora = millis();
+  if (detectada != teclaCandidata)
+  {
+    teclaCandidata = detectada;
+    ultimoCambioTecla = ahora;
+    return 0;
+  }
+  if (ahora - ultimoCambioTecla < antirreboteMs) return 0;
+  if (detectada == 0)
+  {
+    tecladoBloqueado = false;
+    return 0;
+  }
+  if (tecladoBloqueado || detectada == 255) return 0;
+  tecladoBloqueado = true;
+  byte indice = detectada - 1;
+  return teclas[indice / 4][indice % 4];
 }
 
 
@@ -745,42 +761,35 @@ bool tarjetaAutorizada(String uid)
 // 13. CAPTURA DEL PIN
 // ==============================================================
 
+void mostrarCapturaPin()
+{
+  lcd.setCursor(0, 0);
+  lcd.print("INGRESE SU PIN  ");
+  lcd.setCursor(0, 1);
+  for (byte i = 0; i < 4; i++) lcd.print(i < posicionPIN ? '*' : '_');
+  lcd.print("            ");
+}
+
 bool leerPIN()
 {
-  /*
-   TODO - LABORATORIO KEYPAD / INTEGRACIÓN
-
-   Utilizar:
-
-       leerTeclado()
-
-   para capturar un PIN de cuatro números.
-
-   Cada número deberá almacenarse en:
-
-       pinIngresado
-
-   Cuando existan cuatro números:
-
-       return true;
-
-   Mientras el usuario continúe escribiendo:
-
-       return false;
-
-
-   SUGERENCIA:
-
-   En el LCD no mostrar los números.
-
-   Mostrar:
-
-       *
-       **
-       ***
-       ****
-  */
-
+  char tecla = leerTeclado();
+  if (tecla >= '0' && tecla <= '9' && posicionPIN < 4)
+  {
+    pinIngresado[posicionPIN++] = tecla;
+    pinIngresado[posicionPIN] = '\0';
+    mostrarCapturaPin();
+  }
+  else if (tecla == '*' && posicionPIN > 0)
+  {
+    pinIngresado[--posicionPIN] = '\0';
+    mostrarCapturaPin();
+  }
+  else if (tecla == '#')
+  {
+    if (posicionPIN == 4) return true;
+    lcd.setCursor(0, 0);
+    lcd.print("FALTAN DIGITOS  ");
+  }
   return false;
 }
 
@@ -791,25 +800,14 @@ bool leerPIN()
 
 bool validarPIN()
 {
-  /*
-   TODO - LABORATORIO EEPROM
-
-   El PIN autorizado se encuentra almacenado
-   en la memoria EEPROM.
-
-   El algoritmo deberá:
-
-   1. Leer el PIN almacenado.
-   2. Compararlo con pinIngresado.
-   3. Determinar si son iguales.
-
-   Retornar:
-
-       true  -> PIN correcto
-       false -> PIN incorrecto
-  */
-
-  return false;
+  if (usuarioIdentificado < 0 || usuarioIdentificado >= cantidadUsuarios ||
+      posicionPIN != 4) return false;
+  for (byte i = 0; i < 4; i++)
+    if (pinIngresado[i] < '0' || pinIngresado[i] > '9') return false;
+  UsuarioEEPROM usuario;
+  if (!leerUsuario(byte(usuarioIdentificado), usuario)) return false;
+  // Cuatro bytes EEPROM sin terminador nulo: no usar strcmp.
+  return memcmp(pinIngresado, usuario.pin, 4) == 0;
 }
 
 
@@ -909,7 +907,11 @@ void reiniciarSistema()
 
   posicionPIN = 0;
 
-  pinIngresado[0] = '\0';
+  memset(pinIngresado, 0, sizeof(pinIngresado));
+  teclaCandidata = 255;
+  tecladoBloqueado = true;
+  ultimoCambioTecla = millis();
+  seleccionarFila(4);
 
 
   lcd.clear();
@@ -993,7 +995,7 @@ void setup()
   // SERVO
   // ----------------------------------------------------------
 
-  if (!modoPruebaRfid) puerta.attach(PIN_SERVO);
+  if (!modoPruebaRfid && !modoPruebaTeclado) puerta.attach(PIN_SERVO);
 
 
   // ----------------------------------------------------------
@@ -1102,6 +1104,13 @@ void loop()
   */
 
 
+  // Resultado de prueba PIN: no ejecutar actuadores ni contar intentos.
+  if (modoPruebaTeclado && resultadoPruebaVisible)
+  {
+    if (millis() - inicioResultadoPrueba >= 2000) reiniciarSistema();
+    return;
+  }
+
   switch (estado)
   {
 
@@ -1126,16 +1135,25 @@ void loop()
           lcd.clear();
 
           lcd.setCursor(0, 0);
-          lcd.print("TARJETA VALIDA");
-
-          lcd.setCursor(0, 1);
-          lcd.print("INGRESE PIN");
+          posicionPIN = 0;
+          memset(pinIngresado, 0, sizeof(pinIngresado));
+          teclaCandidata = 255;
+          tecladoBloqueado = true;
+          ultimoCambioTecla = millis();
+          mostrarCapturaPin();
 
           cambiarEstado(ESPERANDO_PIN);
         }
         else
         {
           cambiarEstado(ACCESO_DENEGADO);
+          if (modoPruebaTeclado)
+          {
+            lcd.clear();
+            lcd.print("TARJETA INVALIDA");
+            inicioResultadoPrueba = millis();
+            resultadoPruebaVisible = true;
+          }
         }
       }
 
@@ -1162,6 +1180,20 @@ void loop()
 
     case VALIDANDO_PIN:
 
+      if (modoPruebaTeclado)
+      {
+        bool correcto = validarPIN();
+        cambiarEstado(correcto ? ACCESO_AUTORIZADO : ACCESO_DENEGADO);
+        lcd.clear();
+        lcd.print(correcto ? "PIN CORRECTO" : "PIN INCORRECTO");
+        lcd.setCursor(0, 1);
+        lcd.print("MODO PRUEBA");
+        memset(pinIngresado, 0, sizeof(pinIngresado));
+        posicionPIN = 0;
+        inicioResultadoPrueba = millis();
+        resultadoPruebaVisible = true;
+        break;
+      }
       if (validarPIN())
       {
         cambiarEstado(ACCESO_AUTORIZADO);
