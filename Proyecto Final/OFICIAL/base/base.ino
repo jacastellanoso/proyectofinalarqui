@@ -21,6 +21,9 @@
 */
 
 
+// Declaracion adelantada para los prototipos que genera Arduino IDE.
+struct UsuarioEEPROM;
+
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
 #include <Servo.h>
@@ -154,12 +157,39 @@ byte posicionPIN = 0;
 // Número de intentos incorrectos
 
 byte intentosFallidos = 0;
+bool tarjetaRechazada = false;
+byte unosConsecutivos = 0;
+bool lcdAlarmaMostrada = false;
+unsigned long cambioTonoAlarma = 0;
+bool tonoAltoAlarma = false;
 
 // true recupera la prueba RFID anterior; false permite probar RFID + PIN.
 const bool modoPruebaRfid = false;
 // Mantener true: prueba PIN sin servo, sonidos, intentos ni alarma.
 const bool modoPruebaTeclado = true;
 const unsigned long antirreboteMs = 30;
+// Confirmacion del PIN mediante boton fisico D3 (INPUT_PULLUP).
+const unsigned long antirreboteBotonMs = 35;
+bool botonAnteriorLectura = HIGH;
+bool botonEstadoEstable = HIGH;
+unsigned long ultimoCambioBoton = 0;
+
+// True solo una vez por pulsacion, al pasar a LOW estable.
+bool botonConfirmarPresionado()
+{
+  bool lectura = digitalRead(PIN_DIAG);
+  unsigned long ahora = millis();
+  if (lectura != botonAnteriorLectura) ultimoCambioBoton = ahora;
+  botonAnteriorLectura = lectura;
+  if (ahora - ultimoCambioBoton >= antirreboteBotonMs &&
+      lectura != botonEstadoEstable)
+  {
+    botonEstadoEstable = lectura;
+    return lectura == LOW;
+  }
+  return false;
+}
+
 byte teclaCandidata = 255;
 unsigned long ultimoCambioTecla = 0;
 bool tecladoBloqueado = true; // Exigir liberacion al iniciar cada sesion.
@@ -784,7 +814,8 @@ bool leerPIN()
     pinIngresado[--posicionPIN] = '\0';
     mostrarCapturaPin();
   }
-  else if (tecla == '#')
+  // La tecla # ya no confirma. El PIN se confirma con el boton D3.
+  if (botonConfirmarPresionado())
   {
     if (posicionPIN == 4) return true;
     lcd.setCursor(0, 0);
@@ -847,12 +878,13 @@ void cerrarPuerta()
 
 void sonidoCorrecto()
 {
-  /*
-   TODO - LABORATORIO BUZZER
-
-   Utilizar el buzzer pasivo para generar
-   un sonido que indique acceso autorizado.
-  */
+  const unsigned int notas[] = {523, 659, 784, 1047};
+  for (byte i = 0; i < 4; i++) {
+    tone(PIN_BUZZER, notas[i]);
+    delay(i == 3 ? 230 : 115);
+    noTone(PIN_BUZZER);
+    delay(40);
+  }
 }
 
 
@@ -862,12 +894,9 @@ void sonidoCorrecto()
 
 void sonidoError()
 {
-  /*
-   TODO - LABORATORIO BUZZER
-
-   Generar un sonido diferente que permita
-   reconocer un acceso incorrecto.
-  */
+  tone(PIN_BUZZER, 440); delay(170);
+  tone(PIN_BUZZER, 280); delay(260);
+  noTone(PIN_BUZZER);
 }
 
 
@@ -877,20 +906,13 @@ void sonidoError()
 
 void activarAlarma()
 {
-  /*
-   TODO - PROYECTO FINAL
-
-   Diseñar el comportamiento de la alarma.
-
-   Puede utilizar:
-
-       - LED rojo
-       - Buzzer
-       - LCD
-
-   La implementación queda a criterio
-   de cada equipo.
-  */
+  // Sirena no bloqueante: permite detectar 1, 1, 1 mientras suena.
+  unsigned long ahora = millis();
+  if (ahora - cambioTonoAlarma >= 300UL) {
+    cambioTonoAlarma = ahora;
+    tonoAltoAlarma = !tonoAltoAlarma;
+    tone(PIN_BUZZER, tonoAltoAlarma ? 1200 : 650);
+  }
 }
 
 
@@ -904,6 +926,10 @@ void reiniciarSistema()
   resultadoPruebaVisible = false;
   usuarioIdentificado = -1;
   UIDLeido = "";
+  tarjetaRechazada = false;
+  unosConsecutivos = 0;
+  lcdAlarmaMostrada = false;
+  noTone(PIN_BUZZER);
 
   posicionPIN = 0;
 
@@ -1146,14 +1172,8 @@ void loop()
         }
         else
         {
+          tarjetaRechazada = true;
           cambiarEstado(ACCESO_DENEGADO);
-          if (modoPruebaTeclado)
-          {
-            lcd.clear();
-            lcd.print("TARJETA INVALIDA");
-            inicioResultadoPrueba = millis();
-            resultadoPruebaVisible = true;
-          }
         }
       }
 
@@ -1179,140 +1199,98 @@ void loop()
     // ========================================================
 
     case VALIDANDO_PIN:
-
-      if (modoPruebaTeclado)
-      {
-        bool correcto = validarPIN();
-        cambiarEstado(correcto ? ACCESO_AUTORIZADO : ACCESO_DENEGADO);
-        lcd.clear();
-        lcd.print(correcto ? "PIN CORRECTO" : "PIN INCORRECTO");
-        lcd.setCursor(0, 1);
-        lcd.print("MODO PRUEBA");
-        memset(pinIngresado, 0, sizeof(pinIngresado));
-        posicionPIN = 0;
-        inicioResultadoPrueba = millis();
-        resultadoPruebaVisible = true;
-        break;
-      }
-      if (validarPIN())
-      {
+      if (validarPIN()) {
+        intentosFallidos = 0;
         cambiarEstado(ACCESO_AUTORIZADO);
-      }
-      else
-      {
+      } else {
         intentosFallidos++;
-
+        tarjetaRechazada = false;
         cambiarEstado(ACCESO_DENEGADO);
       }
-
       break;
-
-
-    // ========================================================
-    // ESTADO 3 - ACCESO AUTORIZADO
-    // ========================================================
 
     case ACCESO_AUTORIZADO:
-
       lcd.clear();
-
-      lcd.setCursor(0, 0);
-      lcd.print("ACCESO");
-
-      lcd.setCursor(0, 1);
-      lcd.print("AUTORIZADO");
-
-
-      actualizarLedsEstado();
-
+      lcd.setCursor(0, 0); lcd.print("ACCESO");
+      lcd.setCursor(0, 1); lcd.print("AUTORIZADO");
       sonidoCorrecto();
-
-      abrirPuerta();
-
-
+      // Servo NO se inicializa ni se mueve.
       cambiarEstado(PUERTA_ABIERTA);
-
       break;
-
-
-    // ========================================================
-    // ESTADO 4 - ACCESO DENEGADO
-    // ========================================================
 
     case ACCESO_DENEGADO:
-
-      lcd.clear();
-
-      lcd.setCursor(0, 0);
-      lcd.print("ACCESO");
-
-      lcd.setCursor(0, 1);
-      lcd.print("DENEGADO");
-
-
-      actualizarLedsEstado();
-
-      sonidoError();
-
-
-      delay(1500);
-
-
-      if (intentosFallidos >= 3)
-      {
+      if (tarjetaRechazada) {
+        lcd.clear();
+        lcd.setCursor(0, 0); lcd.print("TARJETA INVALIDA");
+        lcd.setCursor(0, 1); lcd.print("ACCESO DENEGADO");
+        sonidoError();
+        delay(1300);
+        reiniciarSistema();
+        break;
+      }
+      if (intentosFallidos < 3) {
+        lcd.clear();
+        lcd.setCursor(0, 0); lcd.print("PIN INCORRECTO");
+        lcd.setCursor(0, 1); lcd.print("INTENTO "); lcd.print(intentosFallidos); lcd.print(" DE 3");
+        sonidoError();
+        delay(850);
+        lcd.clear();
+        lcd.setCursor(0, 0); lcd.print("VUELVA A");
+        lcd.setCursor(0, 1); lcd.print("INTENTARLO");
+        delay(900);
+        posicionPIN = 0;
+        memset(pinIngresado, 0, sizeof(pinIngresado));
+        teclaCandidata = 255;
+        tecladoBloqueado = true;
+        ultimoCambioTecla = millis();
+        mostrarCapturaPin();
+        cambiarEstado(ESPERANDO_PIN);
+      } else {
+        lcd.clear();
+        lcd.setCursor(0, 0); lcd.print("ACCESO DENEGADO");
+        lcd.setCursor(0, 1); lcd.print("3 INTENTOS");
+        sonidoError();
+        delay(900);
+        unosConsecutivos = 0;
+        lcdAlarmaMostrada = false;
+        tonoAltoAlarma = false;
+        cambioTonoAlarma = millis() - 300UL;
+        teclaCandidata = 255;
+        tecladoBloqueado = true;
+        ultimoCambioTecla = millis();
         cambiarEstado(ALARMA);
       }
-      else
-      {
-        apagarLEDs();
-
-        reiniciarSistema();
-      }
-
       break;
-
-
-    // ========================================================
-    // ESTADO 5 - PUERTA ABIERTA
-    // ========================================================
 
     case PUERTA_ABIERTA:
-
-      lcd.clear();
-
-      lcd.setCursor(0, 0);
-      lcd.print("PUERTA ABIERTA");
-
-
-      delay(3000);
-
-
-      cerrarPuerta();
-
-      apagarLEDs();
-
+      // Se presenta el acceso autorizado sin accionar servo.
+      delay(1600);
       intentosFallidos = 0;
-
-
       reiniciarSistema();
-
       break;
-
-
-    // ========================================================
-    // ESTADO 6 - ALARMA
-    // ========================================================
 
     case ALARMA:
-
-      lcd.clear();
-
-      lcd.setCursor(0, 0);
-      lcd.print("!!! ALARMA !!!");
-
-
+      if (!lcdAlarmaMostrada) {
+        lcd.clear();
+        lcd.setCursor(0, 0); lcd.print("ACCESO BLOQUEADO");
+        lcd.setCursor(0, 1); lcd.print("ALARMA ACTIVADA");
+        lcdAlarmaMostrada = true;
+      }
       activarAlarma();
-
+      // Solo tres pulsaciones de 1, separadas por soltar la tecla, desbloquean.
+      {
+        char tecla = leerTeclado();
+        if (tecla != 0) {
+          if (tecla == '1') unosConsecutivos++;
+          else unosConsecutivos = 0;
+          if (unosConsecutivos == 3) {
+            noTone(PIN_BUZZER);
+            intentosFallidos = 0;
+            reiniciarSistema();
+          }
+        }
+      }
       break;
+
   }
 }
