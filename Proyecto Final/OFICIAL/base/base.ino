@@ -46,7 +46,7 @@
  D3  -> Botón de diagnóstico
  D4  -> Servo
 
- D5  -> Libre
+ D5  -> Comunicación de estados con Arduino secundario (D2)
 
  D6  -> RFID RST
 
@@ -73,6 +73,9 @@ const byte PIN_BUZZER = 2;
 const byte PIN_DIAG   = 3;
 const byte PIN_SERVO  = 4;
 
+// Arduino principal D5 -> Arduino secundario D2 (GND compartida).
+const byte PIN_LED_SECUNDARIO = 5;
+
 const byte RFID_RST = 6;
 
 const byte DATA  = 7;
@@ -98,36 +101,18 @@ MFRC522 rfid(RFID_SS, RFID_RST);
 
 
 // ==============================================================
-// 3. REGISTRO DE DESPLAZAMIENTO 74HC595
+// 3. REGISTRO 74HC595 - CABLEADO REAL FASE 0
 // ==============================================================
-
 /*
-
-                  74HC595
-
-             Q0 ─────► LED INICIO
-             Q1 ─────► LED ESPERANDO_RFID
-             Q2 ─────► LED VALIDANDO_RFID
-             Q3 ─────► LED ESPERANDO_PIN
-
-             Q4 ─────► LED VALIDANDO_PIN
-             Q5 ─────► LED AUTORIZADO
-             Q6 ─────► LED DENEGADO
-             Q7 ─────► LED ALARMA
-
-
- Bits:
-
-       7   6   5   4   3   2   1   0
-     ┌───┬───┬───┬───┬───┬───┬───┬───┐
-     │A  │D  │AU │VP │EP │VR │ER │I  │
-     └───┴───┴───┴───┴───┴───┴───┴───┘
-
+   Q0-Q3: filas del teclado, en HIGH cuando no se estan escaneando.
+   Q4: LED 1 VERDE    / INICIO
+   Q5: LED 2 ROJO     / ESPERANDO RFID
+   Q6: LED 3 AMARILLO / VALIDANDO RFID
+   Q7: LED 4 AZUL     / ESPERANDO PIN
+   Los LED 5-8 estan en el Arduino secundario.
+   Nota: el escaneo del teclado continua pendiente (TODO).
 */
-
-// Ocho LEDs activos en HIGH. Desconectar las filas del keypad del 74HC595.
-
-byte registro = B00000001;
+byte registro = B00010000;
 
 
 // ==============================================================
@@ -235,31 +220,76 @@ void cambiarEstado(EstadoSistema nuevoEstado);
 
 
 // ==============================================================
+// 6A. COMUNICACION CON ARDUINO SECUNDARIO - LED 5 A LED 8
+// ==============================================================
+/*
+  Compatible con arduino_secundario_receptor_4_leds.txt.
+  Protocolo: un pulso LOW en D5, con reposo HIGH:
+    100 ms = LED 5 amarillo (validando PIN)
+    200 ms = LED 6 verde    (autorizado)
+    300 ms = LED 7 rojo     (denegado)
+    400 ms = LED 8 azul     (alarma)
+    500 ms = apagar LED 5 a 8.
+
+  Se envia un comando solo cuando cambia el LED requerido.
+  Los LED 1 a 4 siguen en Q4-Q7 del 74HC595 original.
+  Q0-Q3 se conservan para las filas del teclado.
+  En estados 5-8, los cuatro LED del principal se apagan.
+  NOTA: La lectura del teclado y la autenticacion PIN todavia estan TODO
+  en el programa base y no se implementan en esta modificacion.
+*/
+void actualizarLedsSecundarios()
+{
+  static byte ultimoComando = 255; // Obliga a apagar en la inicializacion.
+  byte comando = 0;
+
+  if      (registro & B00000001) comando = 5;
+  else if (registro & B00000010) comando = 6;
+  else if (registro & B00000100) comando = 7;
+  else if (registro & B00001000) comando = 8;
+
+  if (comando == ultimoComando) return;
+  ultimoComando = comando;
+
+  unsigned int duracionMs = (comando == 0) ? 500 : (comando - 4) * 100;
+  digitalWrite(PIN_LED_SECUNDARIO, LOW);
+  delay(duracionMs);
+  digitalWrite(PIN_LED_SECUNDARIO, HIGH);
+  // Pausa necesaria para distinguir comandos consecutivos.
+  delay(160);
+}
+
+// ==============================================================
 // 7. ACTUALIZAR 74HC595
 // ==============================================================
 
 void actualizarRegistro()
 {
   digitalWrite(LATCH, LOW);
-
-  shiftOut(DATA, CLOCK, MSBFIRST, registro);
-
+  // Q0-Q3 son las filas del teclado: en reposo deben estar HIGH.
+  // Q4-Q7 corresponden a los cuatro LEDs ya conectados al 74HC595.
+  // Escribimos los cuatro bits superiores del estado y mantenemos
+  // las filas del teclado inactivas, sin activar LEDs incorrectos.
+  shiftOut(DATA, CLOCK, MSBFIRST, byte((registro & B11110000) | B00001111));
   digitalWrite(LATCH, HIGH);
+
+  // LED 5-8 por D5; tambien se manda apagar al volver a LED 1-4.
+  actualizarLedsSecundarios();
 }
 
 void actualizarLedsEstado()
 {
   switch (estado)
   {
-    case INICIO: registro = B00000001; break;
-    case ESPERANDO_RFID: registro = B00000010; break;
-    case VALIDANDO_RFID: registro = B00000100; break;
-    case ESPERANDO_PIN: registro = B00001000; break;
-    case VALIDANDO_PIN: registro = B00010000; break;
+    case INICIO: registro = B00010000; break;
+    case ESPERANDO_RFID: registro = B00100000; break;
+    case VALIDANDO_RFID: registro = B01000000; break;
+    case ESPERANDO_PIN: registro = B10000000; break;
+    case VALIDANDO_PIN: registro = B00000001; break;
     case ACCESO_AUTORIZADO:
-    case PUERTA_ABIERTA: registro = B00100000; break;
-    case ACCESO_DENEGADO: registro = B01000000; break;
-    case ALARMA: registro = B10000000; break;
+    case PUERTA_ABIERTA: registro = B00000010; break;
+    case ACCESO_DENEGADO: registro = B00000100; break;
+    case ALARMA: registro = B00001000; break;
   }
   actualizarRegistro();
 }
@@ -285,7 +315,9 @@ void apagarLEDs()
 void encenderLED(byte numero)
 {
   if (numero > 7) return;
-  registro = byte(1U << numero);
+  // Pruebas LED 0..7: 0..3 = primeros cuatro LED, 4..7 = secundarios.
+  if (numero < 4) registro = byte(1U << (numero + 4));
+  else registro = byte(1U << (numero - 4));
   actualizarRegistro();
 }
 
@@ -296,7 +328,7 @@ void encenderLED(byte numero)
 
 void seleccionarFila(byte fila)
 {
-  if (modoPruebaRfid) return; // Q0-Q7 reservados para LEDs.
+  if (modoPruebaRfid) return; // Keypad no implementado en esta etapa.
   /*
    TODO - LABORATORIO KEYPAD
 
@@ -925,6 +957,10 @@ void setup()
   pinMode(DATA, OUTPUT);
   pinMode(CLOCK, OUTPUT);
   pinMode(LATCH, OUTPUT);
+
+  // Linea de control al Arduino secundario: HIGH en reposo.
+  digitalWrite(PIN_LED_SECUNDARIO, HIGH);
+  pinMode(PIN_LED_SECUNDARIO, OUTPUT);
 
   cambiarEstado(INICIO);
 
