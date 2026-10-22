@@ -100,6 +100,17 @@ LiquidCrystal_I2C lcd(0x27, 16, 2);
 
 Servo puerta;
 
+// SG90 convencional: movimiento angular, NO dos vueltas completas.
+// Ajustar estos valores tras probar con el mecanismo desacoplado.
+// Si el montaje invierte el sentido, intercambiar ambos angulos.
+const byte ANGULO_CERRADO = 20;
+const byte ANGULO_ABIERTO = 70;
+const byte PASO_SERVO_MS = 9;
+byte posicionServo = ANGULO_CERRADO;
+// Se supone cerrada al encender; no existe sensor de posicion.
+// El estado de puerta abierta se mantiene solo mientras el Arduino esta encendido.
+
+
 MFRC522 rfid(RFID_SS, RFID_RST);
 
 
@@ -166,7 +177,7 @@ bool tonoAltoAlarma = false;
 // true recupera la prueba RFID anterior; false permite probar RFID + PIN.
 const bool modoPruebaRfid = false;
 // Mantener true: prueba PIN sin servo, sonidos, intentos ni alarma.
-const bool modoPruebaTeclado = true;
+const bool modoPruebaTeclado = false; // Servo y secuencia completa habilitados.
 const unsigned long antirreboteMs = 30;
 // Confirmacion del PIN mediante boton fisico D3 (INPUT_PULLUP).
 const unsigned long antirreboteBotonMs = 35;
@@ -846,29 +857,65 @@ bool validarPIN()
 // 15. ABRIR PUERTA
 // ==============================================================
 
-void abrirPuerta()
+// El SG90 gira entre angulos limites. No intentar 720 grados.
+// ATENCION: la direccion fisica depende de la orientacion del servo.
+// Probar DESACOPLADO y ajustar ANGULO_CERRADO y ANGULO_ABIERTO.
+// Se conecta la senal a D4 y se alimenta desde fuente independiente apta,
+// con GND compartida con Arduino. Nunca llevar los 6 V a 5V del Arduino.
+void moverServoA(byte destino)
 {
-  /*
-   TODO - LABORATORIO SERVO
-
-   Mover el servo a la posición correspondiente
-   a la puerta abierta.
-  */
+  if (!puerta.attached()) {
+    puerta.attach(PIN_SERVO);
+    puerta.write(posicionServo);
+    delay(180);
+  }
+  int inicio = posicionServo;
+  int direccion = (destino >= posicionServo) ? 1 : -1;
+  for (int angulo = inicio; angulo != destino; angulo += direccion) {
+    puerta.write(angulo);
+    delay(PASO_SERVO_MS);
+  }
+  puerta.write(destino);
+  delay(220);
+  posicionServo = destino;
+  puerta.detach(); // Evita intentos continuos de movimiento contra el tope.
 }
 
+// ============================================================== 
+// 15. ABRIR PUERTA
+// ============================================================== 
+void abrirPuerta()
+{
+  lcd.clear();
+  lcd.setCursor(0, 0); lcd.print("ABRIENDO PUERTA");
+  lcd.setCursor(0, 1); lcd.print("UN MOMENTO...");
+  delay(250);
+  moverServoA(ANGULO_ABIERTO);
+  lcd.clear();
+  lcd.setCursor(0, 0); lcd.print("PUERTA ABIERTA");
+  lcd.setCursor(0, 1); lcd.print("PASE TARJETA");
+}
 
-// ==============================================================
+// ============================================================== 
 // 16. CERRAR PUERTA
-// ==============================================================
-
+// ============================================================== 
 void cerrarPuerta()
 {
-  /*
-   TODO - LABORATORIO SERVO
-
-   Mover el servo a la posición correspondiente
-   a la puerta cerrada.
-  */
+  lcd.clear();
+  lcd.setCursor(0, 0); lcd.print("CIERRE LA PUERTA");
+  lcd.setCursor(0, 1); lcd.print("MANTENGA CERRADA");
+  delay(1200); // Tiempo de aviso para cerrar la puerta manualmente.
+  lcd.clear();
+  lcd.setCursor(0, 0); lcd.print("CERRANDO PUERTA");
+  lcd.setCursor(0, 1); lcd.print("MANTENGA CERRADA");
+  moverServoA(ANGULO_CERRADO);
+  lcd.clear();
+  lcd.setCursor(0, 0); lcd.print("PUERTA CERRADA");
+  lcd.setCursor(0, 1); lcd.print("CIERRE COMPLETO");
+  tone(PIN_BUZZER, 740, 120); delay(140);
+  tone(PIN_BUZZER, 988, 190); delay(210);
+  noTone(PIN_BUZZER);
+  delay(450);
 }
 
 
@@ -1021,13 +1068,19 @@ void setup()
   // SERVO
   // ----------------------------------------------------------
 
-  if (!modoPruebaRfid && !modoPruebaTeclado) puerta.attach(PIN_SERVO);
+  // El servo se conecta solo mientras se mueve en abrirPuerta/cerrarPuerta.
+  // Un SG90 convencional no da 2 vueltas completas.
+  // Antes del primer uso, colocar manualmente el mecanismo en posicion
+  // CERRADA (ANGULO_CERRADO) con el sistema apagado.
 
 
   // ----------------------------------------------------------
   // RFID
   // ----------------------------------------------------------
 
+  // Dejar SS deseleccionado antes de inicializar SPI.
+  pinMode(RFID_SS, OUTPUT);
+  digitalWrite(RFID_SS, HIGH);
   SPI.begin();
 
   rfid.PCD_Init();
@@ -1049,7 +1102,7 @@ void setup()
   lcd.setCursor(0, 1);
   lcd.print("INICIANDO...");
 
-  delay(1500);
+  delay(350);
 
   reiniciarSistema();
 }
@@ -1214,7 +1267,7 @@ void loop()
       lcd.setCursor(0, 0); lcd.print("ACCESO");
       lcd.setCursor(0, 1); lcd.print("AUTORIZADO");
       sonidoCorrecto();
-      // Servo NO se inicializa ni se mueve.
+      abrirPuerta();
       cambiarEstado(PUERTA_ABIERTA);
       break;
 
@@ -1224,7 +1277,7 @@ void loop()
         lcd.setCursor(0, 0); lcd.print("TARJETA INVALIDA");
         lcd.setCursor(0, 1); lcd.print("ACCESO DENEGADO");
         sonidoError();
-        delay(1300);
+        delay(600);
         reiniciarSistema();
         break;
       }
@@ -1233,11 +1286,11 @@ void loop()
         lcd.setCursor(0, 0); lcd.print("PIN INCORRECTO");
         lcd.setCursor(0, 1); lcd.print("INTENTO "); lcd.print(intentosFallidos); lcd.print(" DE 3");
         sonidoError();
-        delay(850);
+        delay(450);
         lcd.clear();
         lcd.setCursor(0, 0); lcd.print("VUELVA A");
         lcd.setCursor(0, 1); lcd.print("INTENTARLO");
-        delay(900);
+        delay(500);
         posicionPIN = 0;
         memset(pinIngresado, 0, sizeof(pinIngresado));
         teclaCandidata = 255;
@@ -1250,7 +1303,7 @@ void loop()
         lcd.setCursor(0, 0); lcd.print("ACCESO DENEGADO");
         lcd.setCursor(0, 1); lcd.print("3 INTENTOS");
         sonidoError();
-        delay(900);
+        delay(500);
         unosConsecutivos = 0;
         lcdAlarmaMostrada = false;
         tonoAltoAlarma = false;
@@ -1263,10 +1316,27 @@ void loop()
       break;
 
     case PUERTA_ABIERTA:
-      // Se presenta el acceso autorizado sin accionar servo.
-      delay(1600);
-      intentosFallidos = 0;
-      reiniciarSistema();
+      // Mantener desbloqueada hasta una NUEVA lectura de tarjeta valida.
+      // No se solicita PIN para cerrar. El RC522 exige retirar y volver
+      // a presentar la tarjeta para un nuevo evento de lectura.
+      UIDLeido = leerTarjeta();
+      if (UIDLeido != "") {
+        if (tarjetaAutorizada(UIDLeido)) {
+          // Conservar LED de autorizado durante el cierre.
+          cerrarPuerta();
+          intentosFallidos = 0;
+          reiniciarSistema();
+        } else {
+          lcd.clear();
+          lcd.setCursor(0, 0); lcd.print("TARJETA INVALIDA");
+          lcd.setCursor(0, 1); lcd.print("PUERTA ABIERTA");
+          sonidoError();
+          delay(500);
+          lcd.clear();
+          lcd.setCursor(0, 0); lcd.print("PUERTA ABIERTA");
+          lcd.setCursor(0, 1); lcd.print("PASE TARJETA");
+        }
+      }
       break;
 
     case ALARMA:
