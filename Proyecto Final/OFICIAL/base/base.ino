@@ -103,8 +103,8 @@ Servo puerta;
 // SG90 convencional: movimiento angular, NO dos vueltas completas.
 // Ajustar estos valores tras probar con el mecanismo desacoplado.
 // Si el montaje invierte el sentido, intercambiar ambos angulos.
-const byte ANGULO_CERRADO = 20;
-const byte ANGULO_ABIERTO = 70;
+const byte ANGULO_CERRADO = 30;
+const byte ANGULO_ABIERTO = 130;
 const byte PASO_SERVO_MS = 9;
 byte posicionServo = ANGULO_CERRADO;
 // Se supone cerrada al encender; no existe sensor de posicion.
