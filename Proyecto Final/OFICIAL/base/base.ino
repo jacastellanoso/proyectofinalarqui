@@ -103,8 +103,8 @@ Servo puerta;
 // SG90 convencional: movimiento angular, NO dos vueltas completas.
 // Ajustar estos valores tras probar con el mecanismo desacoplado.
 // Si el montaje invierte el sentido, intercambiar ambos angulos.
-const byte ANGULO_CERRADO = 20;
-const byte ANGULO_ABIERTO = 70;
+const byte ANGULO_CERRADO = 30;
+const byte ANGULO_ABIERTO = 130;
 const byte PASO_SERVO_MS = 9;
 byte posicionServo = ANGULO_CERRADO;
 // Se supone cerrada al encender; no existe sensor de posicion.
@@ -284,26 +284,37 @@ void cambiarEstado(EstadoSistema nuevoEstado);
     400 ms = LED 8 azul     (alarma)
     500 ms = apagar LED 5 a 8.
 
-  Se envia un comando solo cuando cambia el LED requerido.
+  El estado se retransmite periodicamente para corregir pulsos perdidos.
+  La senal se genera sin bloquear la ejecucion normal.
   Los LED 1 a 4 siguen en Q4-Q7 del 74HC595 original.
   Q0-Q3 se conservan para las filas del teclado.
   En estados 5-8, los cuatro LED del principal se apagan.
   El barrido de filas no transmite comandos al secundario.
 */
+// Emisor por pulsos completos: evita que delay() de sonidos, LCD o
+// movimientos del servo alargue un pulso y lo confunda con otro LED.
+// Cada cambio se entrega inmediatamente, incluyendo el verde autorizado.
 void actualizarLedsSecundarios()
 {
-  static byte ultimoComando = 255; // Obliga a apagar en la inicializacion.
-  byte comando = comandoLedSecundario;
+  static byte ultimoComando = 255;
+  static unsigned long ultimaTransmision = 0;
+  const unsigned long ahora = millis();
 
-  if (comando == ultimoComando) return;
-  ultimoComando = comando;
+  // Enviar solo cuando cambia el estado, o repetirlo cada 4 segundos
+  // para recuperarse si el secundario se reinicio o perdio una trama.
+  if (ultimoComando == comandoLedSecundario &&
+      ahora - ultimaTransmision < 4000UL) return;
 
-  unsigned int duracionMs = (comando == 0) ? 500 : (comando - 4) * 100;
+  // Impedir que dos comandos LOW se unan en un solo pulso.
+  // La linea ya se encuentra HIGH al entrar aqui.
+  const unsigned int duracion = (comandoLedSecundario == 0)
+                              ? 500U : (comandoLedSecundario - 4U) * 100U;
   digitalWrite(PIN_LED_SECUNDARIO, LOW);
-  delay(duracionMs);
+  delay(duracion);
   digitalWrite(PIN_LED_SECUNDARIO, HIGH);
-  // Pausa necesaria para distinguir comandos consecutivos.
-  delay(160);
+  delay(160); // Separacion minima entre tramas consecutivas.
+  ultimaTransmision = millis();
+  ultimoComando = comandoLedSecundario;
 }
 
 // ==============================================================
@@ -326,6 +337,7 @@ void aplicarLeds()
   else if (registro & B00000100) comandoLedSecundario = 7;
   else if (registro & B00001000) comandoLedSecundario = 8;
   actualizarRegistro();
+  // Transmitir inmediatamente para que el LED corresponda al estado.
   actualizarLedsSecundarios();
 }
 
@@ -334,7 +346,7 @@ void actualizarLedsEstado()
   switch (estado)
   {
     case INICIO: registro = B00010000; break;
-    case ESPERANDO_RFID: registro = B00100000; break;
+    case ESPERANDO_RFID: registro = B00000000; break; // Puerta cerrada: rojo apagado.
     case VALIDANDO_RFID: registro = B01000000; break;
     case ESPERANDO_PIN: registro = B10000000; break;
     case VALIDANDO_PIN: registro = B00000001; break;
@@ -1114,6 +1126,7 @@ void setup()
 
 void loop()
 {
+  actualizarLedsSecundarios(); // Recuperacion cada 4 segundos.
   procesarRegistroSerial();
 
   // Prueba visual independiente de los estados y los actuadores.
