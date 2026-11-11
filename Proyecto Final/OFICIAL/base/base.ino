@@ -26,7 +26,6 @@ struct UsuarioEEPROM;
 
 #include <Wire.h>
 #include <LiquidCrystal_I2C.h>
-#include <Servo.h>
 #include <SPI.h>
 #include <MFRC522.h>
 #include <EEPROM.h>
@@ -47,7 +46,7 @@ struct UsuarioEEPROM;
 
  D2  -> Buzzer pasivo
  D3  -> Botón de diagnóstico
- D4  -> Servo
+ D4  -> Libre (servo trasladado al secundario D7)
 
  D5  -> Comunicación de estados con Arduino secundario (D2)
 
@@ -74,7 +73,7 @@ struct UsuarioEEPROM;
 
 const byte PIN_BUZZER = 2;
 const byte PIN_DIAG   = 3;
-const byte PIN_SERVO  = 4;
+// El servo se controla desde D7 del Arduino secundario.
 
 // Arduino principal D5 -> Arduino secundario D2 (GND compartida).
 const byte PIN_LED_SECUNDARIO = 5;
@@ -98,18 +97,9 @@ const byte columnas[4] = {
 
 LiquidCrystal_I2C lcd(0x27, 16, 2);
 
-Servo puerta;
-
-// SG90 convencional: movimiento angular, NO dos vueltas completas.
-// Ajustar estos valores tras probar con el mecanismo desacoplado.
-// Si el montaje invierte el sentido, intercambiar ambos angulos.
-const byte ANGULO_CERRADO = 30;
-const byte ANGULO_ABIERTO = 130;
-const byte PASO_SERVO_MS = 9;
-byte posicionServo = ANGULO_CERRADO;
-// Se supone cerrada al encender; no existe sensor de posicion.
-// El estado de puerta abierta se mantiene solo mientras el Arduino esta encendido.
-
+// Angulos usados en el Arduino secundario:
+// CERRADO 30 grados, ABIERTO 130 grados.
+// Ajustarlos UNICAMENTE en el secundario si cambia el mecanismo.
 
 MFRC522 rfid(RFID_SS, RFID_RST);
 
@@ -276,13 +266,15 @@ void cambiarEstado(EstadoSistema nuevoEstado);
 // 6A. COMUNICACION CON ARDUINO SECUNDARIO - LED 5 A LED 8
 // ==============================================================
 /*
-  Compatible con arduino_secundario_receptor_4_leds.txt.
+  Compatible con Arduino_Secundario_Servo_D7.txt.
   Protocolo: un pulso LOW en D5, con reposo HIGH:
     100 ms = LED 5 amarillo (validando PIN)
     200 ms = LED 6 verde    (autorizado)
     300 ms = LED 7 rojo     (denegado)
     400 ms = LED 8 azul     (alarma)
     500 ms = apagar LED 5 a 8.
+   650 ms = abrir servo SG90 en secundario D7.
+   800 ms = cerrar servo SG90 en secundario D7.
 
   El estado se retransmite periodicamente para corregir pulsos perdidos.
   La senal se genera sin bloquear la ejecucion normal.
@@ -315,6 +307,19 @@ void actualizarLedsSecundarios()
   delay(160); // Separacion minima entre tramas consecutivas.
   ultimaTransmision = millis();
   ultimoComando = comandoLedSecundario;
+}
+
+// Comandos adicionales usando el MISMO cable D5 -> D2:
+//   650 ms LOW = abrir servo; 800 ms LOW = cerrar servo.
+// El secundario separa estos comandos de los LED (100..500 ms).
+void enviarComandoServo(bool abrir) {
+  // Pulso completo: funciona incluso si hay pausas en el programa principal.
+  digitalWrite(PIN_LED_SECUNDARIO, HIGH);
+  delay(170);
+  digitalWrite(PIN_LED_SECUNDARIO, LOW);
+  delay(abrir ? 650 : 800);
+  digitalWrite(PIN_LED_SECUNDARIO, HIGH);
+  delay(170);
 }
 
 // ==============================================================
@@ -866,61 +871,33 @@ bool validarPIN()
 
 
 // ==============================================================
-// 15. ABRIR PUERTA
+// 15. ABRIR PUERTA (ORDEN AL SECUNDARIO)
 // ==============================================================
-
-// El SG90 gira entre angulos limites. No intentar 720 grados.
-// ATENCION: la direccion fisica depende de la orientacion del servo.
-// Probar DESACOPLADO y ajustar ANGULO_CERRADO y ANGULO_ABIERTO.
-// Se conecta la senal a D4 y se alimenta desde fuente independiente apta,
-// con GND compartida con Arduino. Nunca llevar los 6 V a 5V del Arduino.
-void moverServoA(byte destino)
-{
-  if (!puerta.attached()) {
-    puerta.attach(PIN_SERVO);
-    puerta.write(posicionServo);
-    delay(180);
-  }
-  int inicio = posicionServo;
-  int direccion = (destino >= posicionServo) ? 1 : -1;
-  for (int angulo = inicio; angulo != destino; angulo += direccion) {
-    puerta.write(angulo);
-    delay(PASO_SERVO_MS);
-  }
-  puerta.write(destino);
-  delay(220);
-  posicionServo = destino;
-  puerta.detach(); // Evita intentos continuos de movimiento contra el tope.
-}
-
-// ============================================================== 
-// 15. ABRIR PUERTA
-// ============================================================== 
-void abrirPuerta()
-{
+void abrirPuerta() {
   lcd.clear();
   lcd.setCursor(0, 0); lcd.print("ABRIENDO PUERTA");
   lcd.setCursor(0, 1); lcd.print("UN MOMENTO...");
-  delay(250);
-  moverServoA(ANGULO_ABIERTO);
+  enviarComandoServo(true);
+  // Espera mientras el secundario realiza el movimiento (~1.3 segundos).
+  delay(1500);
   lcd.clear();
   lcd.setCursor(0, 0); lcd.print("PUERTA ABIERTA");
   lcd.setCursor(0, 1); lcd.print("PASE TARJETA");
 }
 
-// ============================================================== 
-// 16. CERRAR PUERTA
-// ============================================================== 
-void cerrarPuerta()
-{
+// ==============================================================
+// 16. CERRAR PUERTA (ORDEN AL SECUNDARIO)
+// ==============================================================
+void cerrarPuerta() {
   lcd.clear();
   lcd.setCursor(0, 0); lcd.print("CIERRE LA PUERTA");
   lcd.setCursor(0, 1); lcd.print("MANTENGA CERRADA");
-  delay(1200); // Tiempo de aviso para cerrar la puerta manualmente.
+  delay(1200);
   lcd.clear();
   lcd.setCursor(0, 0); lcd.print("CERRANDO PUERTA");
   lcd.setCursor(0, 1); lcd.print("MANTENGA CERRADA");
-  moverServoA(ANGULO_CERRADO);
+  enviarComandoServo(false);
+  delay(1500);
   lcd.clear();
   lcd.setCursor(0, 0); lcd.print("PUERTA CERRADA");
   lcd.setCursor(0, 1); lcd.print("CIERRE COMPLETO");
@@ -929,7 +906,6 @@ void cerrarPuerta()
   noTone(PIN_BUZZER);
   delay(450);
 }
-
 
 // ==============================================================
 // 17. SONIDO DE ACCESO CORRECTO
@@ -1080,10 +1056,8 @@ void setup()
   // SERVO
   // ----------------------------------------------------------
 
-  // El servo se conecta solo mientras se mueve en abrirPuerta/cerrarPuerta.
-  // Un SG90 convencional no da 2 vueltas completas.
-  // Antes del primer uso, colocar manualmente el mecanismo en posicion
-  // CERRADA (ANGULO_CERRADO) con el sistema apagado.
+  // Servo trasladado a D7 del Arduino secundario.
+  // No iniciar Servo.h en esta placa. La apertura/cierre se ordena por D5.
 
 
   // ----------------------------------------------------------
